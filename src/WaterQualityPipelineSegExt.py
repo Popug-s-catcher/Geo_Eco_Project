@@ -1,22 +1,26 @@
 from src.WaterQualityPipelineExtended import WaterQualityPipelineExtended
 from src.WaterSegmentation import WaterSegmentation
-import os
-import numpy as np
-import geopandas as gpd
-import matplotlib.pyplot as plt
 from shapely.geometry import Point, box
-import rasterio
 from rasterio.mask import mask
 from rasterio.plot import show
-import warnings
-import random
 from PIL import Image
 from skimage.filters import threshold_otsu, threshold_local
 from skimage.transform import resize
 from sklearn.model_selection import train_test_split
 from skimage import exposure
+import os
+import numpy as np
 import albumentations as A
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import geopandas as gpd
+import pandas as pd
+import rasterio
+import warnings
+import random
 import cv2
+import pickle
+import json
 
 class WaterQualityPipelineSegExt(WaterQualityPipelineExtended): 
     def __init__(self, name="Сегментация"): 
@@ -404,3 +408,395 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
         plt.tight_layout()
         plt.savefig(f'{self.dataset_dir}/augmentation_demo.png', dpi=150, bbox_inches='tight')
         plt.show()
+
+    def find_optimal_threshold(self, model, X_val, y_val, model_name="", thresholds=np.arange(0.3, 0.9, 0.05)):
+        """
+        Поиск оптимального порога бинаризации для модели
+        Перебираем пороги от 0.3 до 0.85 и выбираем тот,
+        при котором IoU на валидационной выборке максимален.
+        """
+        print(f"\nПоиск оптимального порога для {model_name}...")
+        best_threshold, best_iou = 0.5, 0
+        threshold_results = []
+
+        n_samples = min(30, len(X_val))
+        X_sample, y_sample = X_val[:n_samples], y_val[:n_samples]
+
+        for threshold in thresholds:
+            ious = []
+            for i in range(n_samples):
+                pred = model.predict(X_sample[i:i + 1], verbose=0)[0, :, :, 0]
+                pred_bin = self.segmenter.postprocess_mask((pred > threshold).astype(np.float32))
+                iou = self.segmenter.calculate_metrics(y_sample[i], pred_bin)['IoU']
+                ious.append(iou)
+
+            mean_iou = np.mean(ious)
+            threshold_results.append((threshold, mean_iou))
+
+            if mean_iou > best_iou:
+                best_iou, best_threshold = mean_iou, threshold
+                print(f"Порог {threshold:.2f}: IoU = {mean_iou:.4f} (НОВЫЙ ЛУЧШИЙ)")
+            else:
+                print(f"Порог {threshold:.2f}: IoU = {mean_iou:.4f}")
+
+        self.plot_threshold_analysis(threshold_results, model_name)
+        return best_threshold, best_iou
+
+    def plot_threshold_analysis(self, threshold_results, model_name):
+        """
+        ВИЗУАЛИЗАЦИЯ ЗАВИСИМОСТИ IoU ОТ ПОРОГА
+        Показываем, как меняется качество сегментации при изменении
+        порога, и отмечаем оптимальное значение.
+        """
+        thresholds, ious = zip(*threshold_results)
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(thresholds, ious, 'b-o', linewidth=2, markersize=8)
+        plt.xlabel('Порог бинаризации')
+        plt.ylabel('IoU')
+        plt.title(f'Зависимость качества от порога\n{model_name}')
+        plt.grid(True, alpha=0.3)
+
+        best_idx = np.argmax(ious)
+        best_threshold, best_iou = thresholds[best_idx], ious[best_idx]
+
+        plt.axvline(x=best_threshold, color='red', linestyle='--', alpha=0.7)
+        plt.scatter([best_threshold], [best_iou], color='red', s=200, zorder=5)
+        plt.text(best_threshold + 0.02, best_iou - 0.05,
+                 f'Оптимум: {best_threshold:.2f}\nIoU={best_iou:.4f}',
+                 fontsize=10, color='red')
+
+        plt.tight_layout()
+        plt.savefig(f'{self.train_dir}/threshold_analysis_{model_name.replace(" ", "_")}.png',
+                    dpi=150, bbox_inches='tight')
+        plt.show()
+
+    def experiment_tversky_params(self, X_train, y_train, X_val, y_val, param_grid=None, epochs=20, sample_size=100):
+        """
+        Проверяет разные комбинации alpha и beta:
+        - (0.3,0.7): приоритет FP (меньше ложных тревог)
+        - (0.5,0.5): равновесный (как Dice)
+        - (0.7,0.3): приоритет FN (меньше пропусков) - для экологии
+        - (0.8,0.2): сильный приоритет FN
+        - (0.9,0.1): экстремальный приоритет FN
+        """
+        print("\n" + "=" * 60)
+        print("Исследование параметров TVERSKY")
+        print("=" * 60)
+        
+        # Используем подвыборку для ускорения
+        if len(X_train) > sample_size:
+            idx = np.random.choice(len(X_train), sample_size, replace=False)
+            X_train_s, y_train_s = X_train[idx], y_train[idx]
+        else:
+            X_train_s, y_train_s = X_train, y_train
+            
+        if len(X_val) > sample_size // 2:
+            idx = np.random.choice(len(X_val), sample_size // 2, replace=False)
+            X_val_s, y_val_s = X_val[idx], y_val[idx]
+        else:
+            X_val_s, y_val_s = X_val, y_val
+            
+        param_grid = param_grid or [
+            (0.3, 0.7), (0.5, 0.5), (0.7, 0.3), (0.8, 0.2), (0.9, 0.1)
+        ]
+        
+        results = []
+        
+        for alpha, beta in param_grid:
+            print(f"\nТестирование α={alpha}, β={beta}...")
+            model = self.build_unet(input_shape=(256, 256, 3), n_filters=32)
+            
+            def tversky_loss_current(y_true, y_pred):
+                return self.tversky_loss(y_true, y_pred, alpha, beta)
+                
+            model.compile(optimizer=tf.keras.optimizers.Adam(3e-3), loss=tversky_loss_current)
+            model.fit(X_train_s, y_train_s,
+                      validation_data=(X_val_s, y_val_s),
+                      batch_size=8, epochs=epochs, verbose=0)
+                      
+            y_pred = model.predict(X_val_s, verbose=0)
+            y_pred_bin = (y_pred > 0.5).astype(np.float32)
+            
+            ious, recalls, precisions = [], [], []
+            
+            for i in range(len(X_val_s)):
+                metrics = self.segmenter.calculate_metrics(y_val_s[i], y_pred_bin[i])
+                ious.append(metrics['IoU'])
+                
+                true_bin = y_val_s[i] > 0.5
+                pred_bin = y_pred_bin[i] > 0.3
+                
+                tp = np.sum(true_bin & pred_bin)
+                fp = np.sum(~true_bin & pred_bin)
+                fn = np.sum(true_bin & ~pred_bin)
+                
+                recalls.append(tp / (tp + fn + 1e-10))
+                precisions.append(tp / (tp + fp + 1e-10))
+                
+            mean_precision = np.mean(precisions)
+            mean_recall = np.mean(recalls)
+            
+            results.append({
+                'alpha': alpha, 'beta': beta,
+                'IoU': np.mean(ious), 'Recall': mean_recall,
+                'Precision': mean_precision,
+                'F1': 2 * mean_precision * mean_recall / (mean_precision + mean_recall + 1e-10)
+            })
+            
+            print(f" IoU: {results[-1]['IoU']:.4f}, F1: {results[-1]['F1']:.4f}")
+            
+        results_df = pd.DataFrame(results)
+        self.plot_tversky_experiment(results_df)
+        results_df.to_csv(f'{self.dataset_dir}/tversky_experiment.csv', index=False)
+        
+        return results_df
+
+    def plot_tversky_experiment(self, results_df):
+        """
+        Визуализация результатов эксперимента С TVERSKY LOSS
+        Два графика:
+        - Сравнение IoU, Recall, Precision для разных параметров
+        - F1-score для выбора лучших параметров
+        """
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        x = [f"α={r:.1f}\nβ={b:.1f}" for r, b in zip(results_df['alpha'], results_df['beta'])]
+        x_pos = np.arange(len(x))
+        width = 0.25
+        
+        # График 1: Метрики
+        ax1.bar(x_pos - width, results_df['IoU'], width, label='IoU', alpha=0.8, color='green')
+        ax1.bar(x_pos, results_df['Recall'], width, label='Recall', alpha=0.8, color='blue')
+        ax1.bar(x_pos + width, results_df['Precision'], width, label='Precision', alpha=0.8, color='red')
+        ax1.set_xticks(x_pos)
+        ax1.set_xticklabels(x)
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # График 2: F1-score
+        best_idx = results_df['F1'].argmax()
+        ax2.bar(x_pos, results_df['F1'], width, alpha=0.8, color='orange')
+        ax2.set_xticks(x_pos)
+        ax2.set_xticklabels(x)
+        ax2.axhline(y=results_df['F1'].max(), color='red', linestyle='--')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'{self.dataset_dir}/tversky_experiment.png', dpi=150, bbox_inches='tight')
+        plt.show()
+
+    def visualize_predictions(self, models_dict, X_test, y_test, n_samples=4, save=True):
+        """
+        Визуализация предсказаний моделей с адаптивными порогами
+        Показывает для каждого тестового примера:
+        - оригинал
+        - идеальную маску
+        - предсказания всех моделей
+        - карту ошибок лучшей модели
+        """
+        print("\n" + "=" * 60)
+        print("Визуализация предсказаний")
+        print("=" * 60)
+        
+        indices = np.random.choice(len(X_test), min(n_samples, len(X_test)), replace=False)
+        n_models = len(models_dict)
+        
+        fig, axes = plt.subplots(len(indices), n_models + 3, figsize=(4 * (n_models + 3), 4 * len(indices)))
+        if len(indices) == 1:
+            axes = axes.reshape(1, -1)
+            
+        # Эмпирически подобранные пороги для каждой модели
+        optimal_thresholds = {
+            'Dice Loss': 0.65, 
+            'Tversky Loss': 0.5, 
+            'Weighted Dice (w=5)': 0.45
+        }
+        
+        for row, idx in enumerate(indices):
+            img, true_mask = X_test[idx], y_test[idx].squeeze()
+            col = 0
+            
+            # Оригинал
+            axes[row, col].imshow(img)
+            axes[row, col].set_title('Снимок')
+            axes[row, col].axis('off')
+            col += 1
+            
+            # Идеальная маска
+            axes[row, col].imshow(true_mask, cmap='Blues', vmin=0, vmax=1)
+            axes[row, col].set_title('Идеальная маска')
+            axes[row, col].axis('off')
+            col += 1
+            
+            ious = []
+            for name, model in models_dict.items():
+                pred_raw = model.predict(img[np.newaxis], verbose=0)[0, :, :, 0]
+                threshold = optimal_thresholds.get(name, 0.5)
+                
+                # Для Dice Loss используем Otsu если предсказания слишком высокие
+                if name == 'Dice Loss' and pred_raw.mean() > 0.7:
+                    try:
+                        pred_norm = ((pred_raw - pred_raw.min()) / (pred_raw.max() - pred_raw.min() + 1e-8) * 255).astype(np.uint8)
+                        threshold = threshold_otsu(pred_norm) / 255
+                    except:
+                        threshold = 0.7
+                        
+                pred_bin = self.segmenter.postprocess_mask((pred_raw > threshold).astype(np.float32))
+                iou = self.segmenter.calculate_metrics(true_mask, pred_bin)['IoU']
+                ious.append((name, iou))
+                
+                axes[row, col].imshow(pred_bin, cmap='Blues', vmin=0, vmax=1)
+                axes[row, col].set_title(f'{name}\nпорог={threshold:.2f}\nIoU={iou:.3f}', fontsize=9)
+                axes[row, col].axis('off')
+                col += 1
+                
+            # Карта ошибок лучшей модели
+            if ious:
+                best_name, best_iou = max(ious, key=lambda x: x[1])
+                best_model = models_dict[best_name]
+                pred_raw = best_model.predict(img[np.newaxis], verbose=0)[0, :, :, 0]
+                threshold = optimal_thresholds.get(best_name, 0.5)
+                pred_bin = self.segmenter.postprocess_mask((pred_raw > threshold).astype(np.float32))
+                
+                error_map = np.zeros((*pred_bin.shape, 3))
+                tp_mask = (true_mask > 0.5) & (pred_bin > 0.5)  # True Positive (зеленый)
+                fp_mask = (true_mask <= 0.5) & (pred_bin > 0.5) # False Positive (красный)
+                fn_mask = (true_mask > 0.5) & (pred_bin <= 0.5) # False Negative (желтый)
+                
+                error_map[tp_mask] = [0, 1, 0]
+                error_map[fp_mask] = [1, 0, 0]
+                error_map[fn_mask] = [1, 1, 0]
+                
+                axes[row, -1].imshow(error_map)
+                axes[row, -1].set_title(f'Ошибки\n{best_name}: {best_iou:.3f}', fontsize=10)
+                axes[row, -1].axis('off')
+                
+        plt.tight_layout()
+        if save:
+            plt.savefig(f'{self.dataset_dir}/test_predictions.png', dpi=150, bbox_inches='tight')
+        plt.show()
+
+    def visualize_predictions_with_thresholds(self, models_dict, X_test, y_test, optimal_thresholds=None, n_samples=4, save=True):
+        """
+        Визуализация предсказаний с оптимальными порогами
+        Использует найденные ранее оптимальные пороги для каждой модели.
+        """
+        print("\n" + "=" * 60)
+        print("Визуализация - оптимальные пороги")
+        print("=" * 60)
+        
+        if optimal_thresholds is None:
+            optimal_thresholds = {name: 0.5 for name in models_dict.keys()}
+            
+        indices = np.random.choice(len(X_test), min(n_samples, len(X_test)), replace=False)
+        n_models = len(models_dict)
+        
+        fig, axes = plt.subplots(len(indices), n_models + 3, figsize=(4 * (n_models + 3), 4 * len(indices)))
+        if len(indices) == 1:
+            axes = axes.reshape(1, -1)
+            
+        for row, idx in enumerate(indices):
+            img, true_mask = X_test[idx], y_test[idx].squeeze()
+            col = 0
+            
+            axes[row, col].imshow(img)
+            axes[row, col].set_title('Снимок')
+            axes[row, col].axis('off')
+            col += 1
+            
+            axes[row, col].imshow(true_mask, cmap='Blues', vmin=0, vmax=1)
+            axes[row, col].set_title('Идеальная маска')
+            axes[row, col].axis('off')
+            col += 1
+            
+            ious = []
+            for name, model in models_dict.items():
+                pred_raw = model.predict(img[np.newaxis], verbose=0)[0, :, :, 0]
+                threshold = optimal_thresholds.get(name, 0.5)
+                
+                pred_bin = self.segmenter.postprocess_mask((pred_raw > threshold).astype(np.float32))
+                iou = self.segmenter.calculate_metrics(true_mask, pred_bin)['IoU']
+                ious.append((name, iou))
+                
+                axes[row, col].imshow(pred_bin, cmap='Blues', vmin=0, vmax=1)
+                axes[row, col].set_title(f'{name}\nпорог={threshold:.2f}\nIoU={iou:.3f}', fontsize=9)
+                axes[row, col].axis('off')
+                col += 1
+                
+            # Карта ошибок лучшей модели
+            if ious:
+                best_name, best_iou = max(ious, key=lambda x: x[1])
+                best_model = models_dict[best_name]
+                pred_raw = best_model.predict(img[np.newaxis], verbose=0)[0, :, :, 0]
+                threshold = optimal_thresholds.get(best_name, 0.5)
+                pred_bin = self.segmenter.postprocess_mask((pred_raw > threshold).astype(np.float32))
+                
+                error_map = np.zeros((*pred_bin.shape, 3))
+                tp_mask = (true_mask > 0.5) & (pred_bin > 0.5)
+                fp_mask = (true_mask <= 0.5) & (pred_bin > 0.5)
+                fn_mask = (true_mask > 0.5) & (pred_bin <= 0.5)
+                
+                error_map[tp_mask] = [0, 1, 0]
+                error_map[fp_mask] = [1, 0, 0]
+                error_map[fn_mask] = [1, 1, 0]
+                
+                axes[row, -1].imshow(error_map)
+                axes[row, -1].set_title(f'Ошибки\n{best_name}: {best_iou:.3f}', fontsize=10)
+                axes[row, -1].axis('off')
+                
+        plt.tight_layout()
+        if save:
+            plt.savefig(f'{self.dataset_dir}/test_predictions_optimal.png', dpi=150, bbox_inches='tight')
+        plt.show()
+
+    def save_pract34_results(self, models, results, X_train, X_val, X_test):
+        """
+        Сохранение результатов практической работы №3-4.
+        
+        Параметры:
+        - models: словарь обученных моделей {имя: модель}
+        - results: словарь с метриками моделей (от evaluate_models)
+        - X_train, X_val, X_test: массивы данных (для статистики)
+        """
+        os.makedirs(self.train_dir, exist_ok=True)
+        
+        # 1. Сохраняем все модели
+        for name, model in models.items():
+            # Приводим имя к безопасному виду для имени файла
+            safe_name = name.replace(' ', '_').replace('(', '').replace(')', '').replace('=', '')
+            model_path = os.path.join(self.train_dir, f'{safe_name}.h5')
+            model.save(model_path)
+            print(f"Модель сохранена: {model_path}")
+            
+        # 2. Сохраняем результаты сравнения (метрики)
+        results_path = os.path.join(self.train_dir, 'segmentation_results.pkl')
+        with open(results_path, 'wb') as f:
+            pickle.dump(results, f)
+        print(f"Результаты сравнения сохранены: {results_path}")
+        
+        # 3. Находим лучшую модель (по максимальному IoU)
+        best_model_name = max(results, key=lambda n: results[n]['IoU'])
+        best_iou = results[best_model_name]['IoU']
+        
+        # 4. Метаданные эксперимента
+        metadata = {
+            'train_samples': len(X_train),
+            'val_samples': len(X_val),
+            'test_samples': len(X_test),
+            'best_iou': float(best_iou), # преобразуем numpy float в обычный float
+            'best_model': best_model_name,
+            'tversky_params': {'alpha': 0.7, 'beta': 0.3},
+            'date': pd.Timestamp.now().isoformat()
+        }
+        
+        metadata_path = os.path.join(self.train_dir, 'pract34_metadata.json')
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Метаданные сохранены: {metadata_path}")
+        
+        print("\nВсе файлы сохранены в папке:", self.train_dir)
+        print(" - все обученные модели (*.h5)")
+        print(" - segmentation_results.pkl")
+        print(" - pract34_metadata.json")
+        print(" - графики (loss_comparison.png, *_training.png, threshold_analysis_*.png и др.)")
