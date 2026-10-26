@@ -129,13 +129,13 @@ def task_6_2(
 def lb3_run():
     pipeline = WaterQualityPipelineSegExt()
     seg_pipeline = SegmentationPipeline()
-    #pipeline.create_dataset_from_pract2(stride=64)
+    pipeline.create_dataset_from_pract2(stride=64)
 
     optimal_thresholds = {}     # оптимальный порог для каждой модели
     val_ious_optimal = {}       # IoU на валидации с оптимальным порогом
 
     task_2_1(pipeline)
-    (X_train, y_train), (X_val, y_val), (X_test, y_test) = task_3_3(pipeline)
+    # (X_train, y_train), (X_val, y_val), (X_test, y_test) = task_3_3(pipeline)
     #models = task_4_4(pipeline, X_train, y_train, X_val, y_val, X_test, y_test)
     #task_6_2(pipeline, models, results, X_train, X_val, X_test)                    # Сохранение результатов
     #task_5_1(pipeline, models, X_val, y_val,optimal_thresholds, val_ious_optimal)

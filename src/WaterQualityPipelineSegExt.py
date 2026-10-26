@@ -99,7 +99,19 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
 
         return (X_train, y_train), (X_val, y_val), (X_test, y_test)
 
-    def create_dataset_from_pract2(self, raster_path='data/degtyarsk_water.tif', output_dir='water_dataset', patch_size=256, stride=32, save_4band=True):
+    def load_reference_mask(self, src, reference_path, water_classes=(0,)):
+        """
+        Маска воды по карте классов Dynamic World (0 - вода).
+        Маска должна быть на той же сетке, что и снимок
+        """
+        with rasterio.open(reference_path) as ref:
+            if ref.crs != src.crs or ref.transform != src.transform or ref.shape != src.shape:
+                raise ValueError("Сетка маски не совпадает со снимком")
+            classes = ref.read(1)
+        return np.isin(classes, water_classes).astype(np.uint8)
+
+    def create_dataset_from_pract2(self, raster_path='data/degtyarsk_water.tif', dynamic_world_path='data/dynamic_world_label.tif', 
+                                   output_dir='water_dataset', patch_size=256, stride=32, save_4band=True):
         """
         Использует спутниковый снимок из Практической работы №2 и создает набор патчей (изображений) с соответствующими масками воды.
         Параметры:
@@ -128,10 +140,7 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
                 blue = src.read(3).astype(np.float32) # B2 - синий
                 nir = src.read(4).astype(np.float32) # B8 - ближний инфракрасный
                 
-                # Создаем эталонную маску по NDWI (индекс воды)
-                # NDWI = (Green - NIR) / (Green + NIR) дает значения >0.15 для воды
-                ndwi = (green - nir) / (green + nir + 1e-10)
-                water_mask = (ndwi > 0.15).astype(np.uint8)
+                water_mask = self.load_reference_mask(src, dynamic_world_path)
 
                 # Функция нормализации каналов для визуализации (отсекаем 2% и 98% процентили)
                 def norm_band(band):
@@ -196,27 +205,25 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
         print("\n" + "=" * 60)
         print("Задача 1.2: Тестирование методов сегментации")
         print("=" * 60)
+
         image_dir = f'{self.dataset_dir}/images'
         mask_dir = f'{self.dataset_dir}/masks'
         npy_dir = f'{self.dataset_dir}/images_4band'
+        
         if not all(os.path.exists(d) for d in [image_dir, mask_dir, npy_dir]):
             print("Сначала создайте датасет с 4-канальными данными")
             return
         
-        files = sorted(set(os.listdir(image_dir)) &
-        set(os.listdir(mask_dir)))
+        files = sorted(set(os.listdir(image_dir)) & set(os.listdir(mask_dir)))
         n_samples = min(n_samples, len(files))
-        selected = random.sample(files, n_samples)
-        selected.sort()
+        selected = sorted(random.sample(files, n_samples))
         
         # Загружаем данные
-        images_rgb, true_masks, images_4band = [], [], []
-        for fname in selected:
-            images_rgb.append(plt.imread(f'{image_dir}/{fname}'))
+        true_masks, images_4band = [], []
+        for fname in files:
             mask = plt.imread(f'{mask_dir}/{fname}')
             true_masks.append(mask[:, :, 0] if mask.ndim == 3 else mask)
             npy_path = f'{npy_dir}/{fname[:-4]}.npy'
-
             if os.path.exists(npy_path):
                 images_4band.append(np.load(npy_path))
             else:
@@ -224,7 +231,7 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
 
         # Применяем все методы
         method_results = {
-            'Глобальный (0.15)': [self.segmenter.global_threshold(img4) for img4 in images_4band],
+            'Глобальный (0.5)': [self.segmenter.global_threshold(img4) for img4 in images_4band],
             'Оцу': [self.segmenter.otsu_threshold(img4) for img4 in images_4band],
             'Адаптивный': [self.segmenter.adaptive_threshold(img4) for img4 in images_4band],
             'NDWI (0.15)': [self.segmenter.ndwi_threshold(img4) for img4 in images_4band]
@@ -233,22 +240,28 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
         # Добавляем постобработку
         postprocessed = {}
         for method_name, preds in method_results.items():
-            post_preds = [self.segmenter.postprocess_mask(pred) for pred in preds]
-            postprocessed[f'{method_name}+Пост'] = post_preds
-
+            postprocessed[f'{method_name}+Пост'] = [self.segmenter.postprocess_mask(pred) for pred in preds]
+        
         method_results.update(postprocessed)
         
         # Визуализируем результаты
-        self._show_results(images_rgb, true_masks, method_results)
+        sel_idx = [files.index(f) for f in selected]
+        images_rgb = [plt.imread(f'{image_dir}/{fname}') for fname in selected]
+        true_masks_vis = [true_masks[i] for i in sel_idx]
+        method_results_vis = {name: [preds[i] for i in sel_idx] for name, preds in method_results.items()}
+
+        self._show_results(images_rgb, true_masks_vis, method_results_vis)
         
         # Выводим метрики
         print("\n" + "=" * 60)
-        print("Итоговые метрики (средний IoU по патчам)")
+        print(f"Итоговые метрики (средний IoU по всем {len(files)} патчам)")
         print("=" * 60)
         
         for method_name in method_results.keys():
-            ious = [self.segmenter.calculate_metrics(true_masks[i], method_results[method_name][i])['IoU'] for i in range(len(images_rgb))]
+            ious = [self.segmenter.calculate_metrics(true_masks[i], method_results[method_name][i])['IoU']
+                    for i in range(len(files))]
             print(f"{method_name:25}: {np.mean(ious):.3f}")
+
     
     def _show_results(self, images, true_masks, methods):
         """
