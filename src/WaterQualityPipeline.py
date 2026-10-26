@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
+from geopy.distance import geodesic
 import folium
 import os
 import utm
@@ -99,40 +100,20 @@ class WaterQualityPipeline:
         print(f"Координаты преобразованы из {original_crs} в WGS84")
         return self.samples
 
-    def calculate_distances(self, gdf_sk42):
-        """
-        Расчет расстояний между точками в разных проекциях
-        """
-        gdf_wgs84 = gdf_sk42.to_crs('EPSG:4326')
-        
-        lon, lat = gdf_wgs84.geometry.x.mean(), gdf_wgs84.geometry.y.mean()
-        zone_number = utm.from_latlon(lat, lon)[2]
-        epsg_code = 32600 + zone_number
-        gdf_utm = gdf_wgs84.to_crs(f'EPSG:{epsg_code}')
-        print(f"Зона UTM: {zone_number}N (EPSG:{epsg_code})")
-
-        distances_utm = []
-        distances_deg = []
-
-        for i in range(len(gdf_wgs84) - 1):
-            p1_utm = gdf_utm.geometry.iloc[i]
-            p2_utm = gdf_utm.geometry.iloc[i + 1]
-            dist_utm = p1_utm.distance(p2_utm)
-            distances_utm.append(dist_utm)
-            p1_deg = gdf_wgs84.geometry.iloc[i]
-            p2_deg = gdf_wgs84.geometry.iloc[i + 1]
-            dist_deg = p1_deg.distance(p2_deg)
-            distances_deg.append(dist_deg)
-        
-        distances_deg_km = [d * 111 for d in distances_deg]
-
-        print("\nСравнение расстояний:")
-        print("-" * 50)
-        print("Пара | В UTM (м) | В градусах (км, грубо) | Разница")
-        print("-" * 50)
-        for i, (d_utm, d_deg_km) in enumerate(zip(distances_utm, distances_deg_km)):
-            diff = abs(d_utm / 1000 - d_deg_km)
-            print(f"{i + 1}-{i + 2} | {d_utm:.0f} м | {d_deg_km:.2f} км | {diff:.2f} км")
+    def calculate_distances(self, gdf):
+        g = gdf.to_crs('EPSG:4326')
+        u = g.to_crs('EPSG:32636')
+        print("Пара | UTM, км | x111, км | Geodesic, км | Err UTM,% | Err x111,%")
+        for i in range(len(g) - 1):
+            p1, p2 = g.geometry.iloc[i], g.geometry.iloc[i + 1]
+            utm = u.geometry.iloc[i].distance(u.geometry.iloc[i + 1]) / 1000
+            lat1, lon1, lat2, lon2 = p1.y, p1.x, p2.y, p2.x
+            m = np.radians((lat1 + lat2) / 2)
+            deg = np.hypot((lat2 - lat1) * 111.32,
+                        (lon2 - lon1) * 111.32 * np.cos(m))
+            geo = geodesic((lat1, lon1), (lat2, lon2)).km
+            print(f"{i+1}-{i+2} | {utm:.2f} | {deg:.2f} | {geo:.2f} | "
+                f"{abs(utm-geo)/geo*100:.3f} | {abs(deg-geo)/geo*100:.3f}")
 
     def compare_area_calculations(self):
             if self.world_data is None:
