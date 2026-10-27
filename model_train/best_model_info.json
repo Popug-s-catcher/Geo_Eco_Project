@@ -1,0 +1,5 @@
+{
+  "best_model_file": "combined_loss.h5",
+  "best_threshold": 0.55,
+  "val_iou": 0.9287
+}

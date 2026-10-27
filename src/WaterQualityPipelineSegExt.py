@@ -19,7 +19,6 @@ import rasterio
 import warnings
 import random
 import cv2
-import pickle
 import json
 
 class WaterQualityPipelineSegExt(WaterQualityPipelineExtended): 
@@ -321,107 +320,6 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
         plt.savefig(f'{self.dataset_dir}/segmentation_results.png', dpi=150, bbox_inches='tight')
         plt.show()
 
-    def get_augmentation(self, p=0.5):
-        """
-        Аугментация позволяет искусственно увеличить размер
-        датасета за счет случайных преобразований изображений.
-        """
-        return A.Compose([
-            # Геометрические преобразования
-            A.RandomRotate90(p=0.5),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            A.Transpose(p=0.3),
-            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=30, p=0.3),
-            
-            # Цветовые преобразования
-            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.4),
-            A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=15, p=0.3),
-            
-            # Шумы и размытие
-            A.GaussNoise(std_range=(0.1, 0.2), p=0.3),
-            A.ISONoise(color_shift=(0.01, 0.05), p=0.2),
-            A.GaussianBlur(blur_limit=(3, 5), p=0.3),
-            A.MedianBlur(blur_limit=5, p=0.2),
-            
-            # Погодные эффекты (для спутниковых снимков)
-            A.RandomFog(fog_coef_range=(0.1, 0.3), p=0.2),
-            A.RandomRain(slant_range=(-10, 10), drop_width=1, p=0.1),
-            A.RandomSnow(snow_point_range=(0.1, 0.3), p=0.1),
-            
-            # Вырезание (учат модель не полагаться на отдельные пиксели)
-            A.CoarseDropout(
-                num_holes_range=(4, 8), 
-                hole_height_range=(16, 32), 
-                hole_width_range=(16, 32), 
-                fill=0, 
-                p=0.2
-            ),
-        ], p=p)
-
-    def apply_augmentation(self, images, masks, augmentor=None):
-        """
-        Применение аугментации к батчу изображений
-        Преобразует изображения и соответствующие маски, сохраняя
-        их соответствие.
-        """
-        if augmentor is None:
-            augmentor = self.get_augmentation()
-        
-        aug_images, aug_masks = [], []
-        for i in range(len(images)):
-            # Приводим к uint8
-            img_uint8 = (images[i] * 255).astype(np.uint8) if images[i].max() <= 1 else images[i].astype(np.uint8)
-            mask_uint8 = (masks[i] * 255).astype(np.uint8)
-            augmented = augmentor(image=img_uint8, mask=mask_uint8)
-
-            # Возвращаем в float32 [0,1] для нейросети
-            aug_images.append(augmented['image'].astype(np.float32) / 255.0)
-            aug_masks.append(augmented['mask'].astype(np.float32) / 255.0)
-        
-        return np.array(aug_images), np.array(aug_masks)
-
-    def visualize_augmentation(self, n_samples=4):
-        """
-        Демонстрация аугментации на примерах
-        Показывает оригиналы и аугментированные версии изображений
-        и масок.
-        """
-        print("\n" + "=" * 60)
-        print("Демонстрация аугментации")
-        print("=" * 60)
-        
-        if not hasattr(self, 'dataset') or 'X_train' not in self.dataset:
-            print("Сначала выполните load_dataset()")
-            return
-        
-        sample_images = self.dataset['X_train'][:n_samples]
-        sample_masks = self.dataset['y_train'][:n_samples]
-        aug_images, aug_masks = self.apply_augmentation(sample_images, sample_masks)
-        fig, axes = plt.subplots(2, n_samples * 2, figsize=(4 * n_samples * 2, 8))
-        
-        for i in range(n_samples):
-            # Оригиналы
-            axes[0, i * 2].imshow(sample_images[i])
-            axes[0, i * 2].set_title(f'Оригинал {i + 1}')
-            axes[0, i * 2].axis('off')
-            axes[0, i * 2 + 1].imshow(sample_masks[i], cmap='Blues', vmin=0, vmax=1)
-            axes[0, i * 2 + 1].set_title(f'Маска {i + 1}')
-            axes[0, i * 2 + 1].axis('off')
-            
-            # Аугментированные
-            axes[1, i * 2].imshow(aug_images[i])
-            axes[1, i * 2].set_title(f'Аугмент. {i + 1}')
-            axes[1, i * 2].axis('off')
-            axes[1, i * 2 + 1].imshow(aug_masks[i], cmap='Blues', vmin=0, vmax=1)
-            axes[1, i * 2 + 1].set_title(f'Маска аугм.')
-            axes[1, i * 2 + 1].axis('off')
-
-        plt.tight_layout()
-        plt.savefig(f'{self.dataset_dir}/augmentation_demo.png', dpi=150, bbox_inches='tight')
-        plt.show()
-
     def find_optimal_threshold(self, model, X_val, y_val, model_name="", thresholds=np.arange(0.3, 0.9, 0.05)):
         """
         Поиск оптимального порога бинаризации для модели
@@ -462,142 +360,31 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
         порога, и отмечаем оптимальное значение.
         """
         thresholds, ious = zip(*threshold_results)
-        
+
         plt.figure(figsize=(10, 6))
         plt.plot(thresholds, ious, 'b-o', linewidth=2, markersize=8)
         plt.xlabel('Порог бинаризации')
         plt.ylabel('IoU')
         plt.title(f'Зависимость качества от порога\n{model_name}')
         plt.grid(True, alpha=0.3)
-
+    
         best_idx = np.argmax(ious)
         best_threshold, best_iou = thresholds[best_idx], ious[best_idx]
-
+    
         plt.axvline(x=best_threshold, color='red', linestyle='--', alpha=0.7)
         plt.scatter([best_threshold], [best_iou], color='red', s=200, zorder=5)
-        plt.text(best_threshold + 0.02, best_iou - 0.05,
-                 f'Оптимум: {best_threshold:.2f}\nIoU={best_iou:.4f}',
-                 fontsize=10, color='red')
-
+    
+        plt.annotate(
+            f'Оптимум: {best_threshold:.2f}\nIoU={best_iou:.4f}',
+            xy=(best_threshold, best_iou), xytext=(10, -35), textcoords='offset points',
+            fontsize=10, color='red'
+        )
+    
         plt.tight_layout()
         plt.savefig(f'{self.train_dir}/threshold_analysis_{model_name.replace(" ", "_")}.png',
                     dpi=150, bbox_inches='tight')
         plt.show()
 
-    def experiment_tversky_params(self, X_train, y_train, X_val, y_val, param_grid=None, epochs=20, sample_size=100):
-        """
-        Проверяет разные комбинации alpha и beta:
-        - (0.3,0.7): приоритет FP (меньше ложных тревог)
-        - (0.5,0.5): равновесный (как Dice)
-        - (0.7,0.3): приоритет FN (меньше пропусков) - для экологии
-        - (0.8,0.2): сильный приоритет FN
-        - (0.9,0.1): экстремальный приоритет FN
-        """
-        print("\n" + "=" * 60)
-        print("Исследование параметров TVERSKY")
-        print("=" * 60)
-        
-        # Используем подвыборку для ускорения
-        if len(X_train) > sample_size:
-            idx = np.random.choice(len(X_train), sample_size, replace=False)
-            X_train_s, y_train_s = X_train[idx], y_train[idx]
-        else:
-            X_train_s, y_train_s = X_train, y_train
-            
-        if len(X_val) > sample_size // 2:
-            idx = np.random.choice(len(X_val), sample_size // 2, replace=False)
-            X_val_s, y_val_s = X_val[idx], y_val[idx]
-        else:
-            X_val_s, y_val_s = X_val, y_val
-            
-        param_grid = param_grid or [
-            (0.3, 0.7), (0.5, 0.5), (0.7, 0.3), (0.8, 0.2), (0.9, 0.1)
-        ]
-        
-        results = []
-        
-        for alpha, beta in param_grid:
-            print(f"\nТестирование α={alpha}, β={beta}...")
-            model = self.build_unet(input_shape=(256, 256, 3), n_filters=32)
-            
-            def tversky_loss_current(y_true, y_pred):
-                return self.tversky_loss(y_true, y_pred, alpha, beta)
-                
-            model.compile(optimizer=tf.keras.optimizers.Adam(3e-3), loss=tversky_loss_current)
-            model.fit(X_train_s, y_train_s,
-                      validation_data=(X_val_s, y_val_s),
-                      batch_size=8, epochs=epochs, verbose=0)
-                      
-            y_pred = model.predict(X_val_s, verbose=0)
-            y_pred_bin = (y_pred > 0.5).astype(np.float32)
-            
-            ious, recalls, precisions = [], [], []
-            
-            for i in range(len(X_val_s)):
-                metrics = self.segmenter.calculate_metrics(y_val_s[i], y_pred_bin[i])
-                ious.append(metrics['IoU'])
-                
-                true_bin = y_val_s[i] > 0.5
-                pred_bin = y_pred_bin[i] > 0.3
-                
-                tp = np.sum(true_bin & pred_bin)
-                fp = np.sum(~true_bin & pred_bin)
-                fn = np.sum(true_bin & ~pred_bin)
-                
-                recalls.append(tp / (tp + fn + 1e-10))
-                precisions.append(tp / (tp + fp + 1e-10))
-                
-            mean_precision = np.mean(precisions)
-            mean_recall = np.mean(recalls)
-            
-            results.append({
-                'alpha': alpha, 'beta': beta,
-                'IoU': np.mean(ious), 'Recall': mean_recall,
-                'Precision': mean_precision,
-                'F1': 2 * mean_precision * mean_recall / (mean_precision + mean_recall + 1e-10)
-            })
-            
-            print(f" IoU: {results[-1]['IoU']:.4f}, F1: {results[-1]['F1']:.4f}")
-            
-        results_df = pd.DataFrame(results)
-        self.plot_tversky_experiment(results_df)
-        results_df.to_csv(f'{self.dataset_dir}/tversky_experiment.csv', index=False)
-        
-        return results_df
-
-    def plot_tversky_experiment(self, results_df):
-        """
-        Визуализация результатов эксперимента С TVERSKY LOSS
-        Два графика:
-        - Сравнение IoU, Recall, Precision для разных параметров
-        - F1-score для выбора лучших параметров
-        """
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
-        x = [f"α={r:.1f}\nβ={b:.1f}" for r, b in zip(results_df['alpha'], results_df['beta'])]
-        x_pos = np.arange(len(x))
-        width = 0.25
-        
-        # График 1: Метрики
-        ax1.bar(x_pos - width, results_df['IoU'], width, label='IoU', alpha=0.8, color='green')
-        ax1.bar(x_pos, results_df['Recall'], width, label='Recall', alpha=0.8, color='blue')
-        ax1.bar(x_pos + width, results_df['Precision'], width, label='Precision', alpha=0.8, color='red')
-        ax1.set_xticks(x_pos)
-        ax1.set_xticklabels(x)
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # График 2: F1-score
-        best_idx = results_df['F1'].argmax()
-        ax2.bar(x_pos, results_df['F1'], width, alpha=0.8, color='orange')
-        ax2.set_xticks(x_pos)
-        ax2.set_xticklabels(x)
-        ax2.axhline(y=results_df['F1'].max(), color='red', linestyle='--')
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(f'{self.dataset_dir}/tversky_experiment.png', dpi=150, bbox_inches='tight')
-        plt.show()
 
     def visualize_predictions(self, models_dict, X_test, y_test, n_samples=4, save=True):
         """
@@ -762,54 +549,3 @@ class WaterQualityPipelineSegExt(WaterQualityPipelineExtended):
         if save:
             plt.savefig(f'{self.dataset_dir}/test_predictions_optimal.png', dpi=150, bbox_inches='tight')
         plt.show()
-
-    def save_pract34_results(self, models, results, X_train, X_val, X_test):
-        """
-        Сохранение результатов практической работы №3-4.
-        
-        Параметры:
-        - models: словарь обученных моделей {имя: модель}
-        - results: словарь с метриками моделей (от evaluate_models)
-        - X_train, X_val, X_test: массивы данных (для статистики)
-        """
-        os.makedirs(self.train_dir, exist_ok=True)
-        
-        # 1. Сохраняем все модели
-        for name, model in models.items():
-            # Приводим имя к безопасному виду для имени файла
-            safe_name = name.replace(' ', '_').replace('(', '').replace(')', '').replace('=', '')
-            model_path = os.path.join(self.train_dir, f'{safe_name}.h5')
-            model.save(model_path)
-            print(f"Модель сохранена: {model_path}")
-            
-        # 2. Сохраняем результаты сравнения (метрики)
-        results_path = os.path.join(self.train_dir, 'segmentation_results.pkl')
-        with open(results_path, 'wb') as f:
-            pickle.dump(results, f)
-        print(f"Результаты сравнения сохранены: {results_path}")
-        
-        # 3. Находим лучшую модель (по максимальному IoU)
-        best_model_name = max(results, key=lambda n: results[n]['IoU'])
-        best_iou = results[best_model_name]['IoU']
-        
-        # 4. Метаданные эксперимента
-        metadata = {
-            'train_samples': len(X_train),
-            'val_samples': len(X_val),
-            'test_samples': len(X_test),
-            'best_iou': float(best_iou), # преобразуем numpy float в обычный float
-            'best_model': best_model_name,
-            'tversky_params': {'alpha': 0.7, 'beta': 0.3},
-            'date': pd.Timestamp.now().isoformat()
-        }
-        
-        metadata_path = os.path.join(self.train_dir, 'pract34_metadata.json')
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        print(f"Метаданные сохранены: {metadata_path}")
-        
-        print("\nВсе файлы сохранены в папке:", self.train_dir)
-        print(" - все обученные модели (*.h5)")
-        print(" - segmentation_results.pkl")
-        print(" - pract34_metadata.json")
-        print(" - графики (loss_comparison.png, *_training.png, threshold_analysis_*.png и др.)")

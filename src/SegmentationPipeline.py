@@ -1,5 +1,8 @@
 import json
 import numpy as np
+import os
+import pandas as pd
+import pickle
 import tensorflow as tf
 import rasterio
 from rasterio import features
@@ -8,6 +11,7 @@ from shapely.geometry import shape
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from src.WaterQualityPipelineSegExt import WaterQualityPipelineSegExt
+from src.Unet import Unet
 
 
 class SegmentationPipeline(WaterQualityPipelineSegExt):
@@ -22,6 +26,7 @@ class SegmentationPipeline(WaterQualityPipelineSegExt):
         self.segmentation_model = None
         self.segmentation_masks = None
         self.best_threshold = None # добавили поле для порога
+        self.unet = Unet()
 
     def load_segmentation_model(self, model_path='model_train/unet_tversky.h5'):
         """
@@ -30,13 +35,13 @@ class SegmentationPipeline(WaterQualityPipelineSegExt):
         """
         # Словарь с пользовательскими объектами
         custom_objs = {
-            'dice_loss': self.dice_loss,
-            'tversky_loss': self.tversky_loss,
-            'weighted_dice_loss': self.weighted_dice_loss,
-            'combined_loss': self.combined_loss,
-            'tversky_loss_07_03': lambda y_true, y_pred: self.tversky_loss(y_true, y_pred, 0.7, 0.3),
-            'weighted_dice_w5': lambda y_true, y_pred: self.weighted_dice_loss(y_true, y_pred, weight=5.0),
-            'loss': self.dice_loss
+            'dice_loss': self.unet.dice_loss,
+            'tversky_loss': self.unet.tversky_loss,
+            'weighted_dice_loss': self.unet.weighted_dice_loss,
+            'combined_loss': self.unet.combined_loss,
+            'tversky_loss_07_03': lambda y_true, y_pred: self.unet.tversky_loss(y_true, y_pred, 0.7, 0.3),
+            'weighted_dice_w5': lambda y_true, y_pred: self.unet.weighted_dice_loss(y_true, y_pred, weight=5.0),
+            'loss': self.unet.dice_loss
         }
         
         self.segmentation_model = tf.keras.models.load_model(
@@ -175,3 +180,54 @@ class SegmentationPipeline(WaterQualityPipelineSegExt):
         # Здесь используем уже сохраненный файл output_mask
         self.mask_to_geojson(output_mask, output_geojson, min_area=min_area)
         print("Интеграция завершена: получены растровая и векторная маски.")
+
+    def save_pract34_results(self, models, results, X_train, X_val, X_test):
+        """
+        Сохранение результатов практической работы №3-4.
+        
+        Параметры:
+        - models: словарь обученных моделей {имя: модель}
+        - results: словарь с метриками моделей (от evaluate_models)
+        - X_train, X_val, X_test: массивы данных (для статистики)
+        """
+        os.makedirs(self.train_dir, exist_ok=True)
+        
+        # 1. Сохраняем все модели
+        for name, model in models.items():
+            # Приводим имя к безопасному виду для имени файла
+            safe_name = name.replace(' ', '_').replace('(', '').replace(')', '').replace('=', '')
+            model_path = os.path.join(self.train_dir, f'{safe_name}.h5')
+            model.save(model_path)
+            print(f"Модель сохранена: {model_path}")
+            
+        # 2. Сохраняем результаты сравнения (метрики)
+        results_path = os.path.join(self.train_dir, 'segmentation_results.pkl')
+        with open(results_path, 'wb') as f:
+            pickle.dump(results, f)
+        print(f"Результаты сравнения сохранены: {results_path}")
+        
+        # 3. Находим лучшую модель (по максимальному IoU)
+        best_model_name = max(results, key=lambda n: results[n]['IoU'])
+        best_iou = results[best_model_name]['IoU']
+        
+        # 4. Метаданные эксперимента
+        metadata = {
+            'train_samples': len(X_train),
+            'val_samples': len(X_val),
+            'test_samples': len(X_test),
+            'best_iou': float(best_iou), # преобразуем numpy float в обычный float
+            'best_model': best_model_name,
+            'tversky_params': {'alpha': 0.7, 'beta': 0.3},
+            'date': pd.Timestamp.now().isoformat()
+        }
+        
+        metadata_path = os.path.join(self.train_dir, 'pract34_metadata.json')
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Метаданные сохранены: {metadata_path}")
+        
+        print("\nВсе файлы сохранены в папке:", self.train_dir)
+        print(" - все обученные модели (*.h5)")
+        print(" - segmentation_results.pkl")
+        print(" - pract34_metadata.json")
+        print(" - графики (loss_comparison.png, *_training.png, threshold_analysis_*.png и др.)")
