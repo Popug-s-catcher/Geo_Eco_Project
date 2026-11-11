@@ -19,12 +19,13 @@ def load_sputnik_image():
     # Можно задать область прямоугольником
     # lat1 56.64 lon1 60
     # lat2 56.84 lon2 60.2
+    DATE_START, DATE_END = '2025-06-01', '2025-08-01'
     roi = ee.Geometry.Rectangle([60, 56.64, 60.2, 56.79])
     # Можно задать через конкретные точки
     # data = {
     #     'name': ['Point 1', 'Point 2', 'Point 3'],
-    #     'lon': [30.204035, 30.358192, 30.244896],
-    #     'lat': [59.985333, 59.978309, 59.909067]
+    #     'lon': [pt1[1], pt2[1], pt3[1]], # долгота
+    #     'lat': [pt1[0], pt2[0], pt3[0]]  # широта
     # }
 
     # # Из табличных координат в геопространственный объект
@@ -42,37 +43,61 @@ def load_sputnik_image():
     collection = (
     ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
         .filterBounds(roi)
-        .filterDate('2025-06-01', '2025-08-01')
-        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+        .filterDate(DATE_START, DATE_END)
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+        # .filter(ee.Filter.contains(leftField='.geo', rightValue=roi))
         .sort('CLOUDY_PIXEL_PERCENTAGE')
     )
 
     # 4. Проверка наличия снимков
     size = collection.size().getInfo()
     print(f"Найдено снимков: {size}")
-    if size > 0:
-        image = collection.first()
-        cloudiness = image.get('CLOUDY_PIXEL_PERCENTAGE').getInfo()
-        print(f"Облачность лучшего снимка: {cloudiness}%")
+    if size == 0:
+        raise SystemExit("Снимки над участком не найдены")
 
-        # Выбираем каналы: B4(Red), B3(Green), B2(Blue), B8(NIR), B11(SWIR)
-        selected_bands = image.select(['B4', 'B3', 'B2', 'B8', 'B11'])
+    image = collection.first()
+    index = image.get('system:index').getInfo()
+    date = image.date().format('YYYY-MM-dd HH:mm').getInfo()
+    cloudiness = image.get('CLOUDY_PIXEL_PERCENTAGE').getInfo()
+    print(f"Снимок: {index}")
+    print(f"Дата снимка: {date}, облачность: {cloudiness}%")
 
-        # Экспорт в Google Drive
+    dw = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1').filter(ee.Filter.eq('system:index', index))
+    if dw.size().getInfo() == 0:
+        raise SystemExit(f"Для снимка {index} нет маски Dynamic World")
+
+    # label: 0 - вода, 1 - деревья, 2 - трава, 3 - затопляемая растительность, 4 - посевы,
+    # 5 - кустарники, 6 - застройка, 7 - голая почва, 8 - снег и лед; 255 - нет данных
+    label = dw.first().select('label').unmask(255).toByte()
+
+    # Сетка 10-метрового канала B4 снимка, чтобы снимок и маска совпадали попиксельно
+    projection = image.select('B4').projection().getInfo()
+
+    # Прямоугольник в проекции снимка (UTM): в UTM прямоугольник в градусах повернут,
+    # и углы экспорта вне него заполнялись бы нулями
+    region = roi.bounds(1, projection['crs'])
+
+    exports = {
+        'degtyarsk_water': image.select(['B4', 'B3', 'B2', 'B8', 'B11']),
+        'dynamic_world_label': label,
+    }
+
+    for name, export_image in exports.items():
         task = ee.batch.Export.image.toDrive(
-            image=selected_bands,
-            description='sentinel2_spb',
+            image=export_image,
+            description=name,
             folder='gee_exports',
-            fileNamePrefix='sentinel2_16bit_data',
-            region=roi,
-            scale=10,
+            fileNamePrefix=name,
+            region=region,
+            crs=projection['crs'],
+            crsTransform=projection['transform'],
             fileFormat='GeoTIFF',
             maxPixels=1e9
         )
-
         task.start()
-        print("Задача экспорта запущена!")
-        print("После завершения скачайте снимок в папку data/")
+        print(f"Задача экспорта {name} запущена!")
+
+    print("После завершения скачайте degtyarsk_water и dynamic_world_label.tif в папку data/")
 
 
 def task_1_2(pipeline: WaterQualityPipelineExtended):
