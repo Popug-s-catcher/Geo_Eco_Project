@@ -132,8 +132,6 @@ class WaterQualityPipelineAnalytics(WaterQualityPipelineExtended):
                 for _ in range(len(samples_gdf))
             ]
 
-        print(f"\nПервые 5 записей:")
-
         self.samples_gdf = samples_gdf
 
     def show_pdk(self):
@@ -290,7 +288,7 @@ class WaterQualityPipelineAnalytics(WaterQualityPipelineExtended):
             lat = row.geometry.y
             lon = row.geometry.x
 
-            if not (45.0 <= lat <= 46.0 and 47.0 <= lon <= 49.0):
+            if not (56.0 <= lat <= 57.0 and 59.9 <= lon <= 61.0):
                 print(f"Точка {row.id}: координаты вне области ({lat:.4f}, {lon:.4f})")
                 continue
 
@@ -658,6 +656,9 @@ class WaterQualityPipelineAnalytics(WaterQualityPipelineExtended):
 
     def calculate_chlorophyll(self):
         with rasterio.open(self.s2_path) as src:
+            print("Band count:", src.count)
+            print("Descriptions:", src.descriptions)
+
             blue = src.read(3).astype(np.float32)
             green = src.read(2).astype(np.float32)
             red = src.read(1).astype(np.float32)
