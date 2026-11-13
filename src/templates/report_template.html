@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="../templates/style.css">
+    <title>{{ t.page_title }}</title>
+</head>
+<body>
+    <div class="gost-header">
+        <h1>{{ t.report }}</h1>
+        <h2>{{ t.report_subtitle }}</h2>
+        <p>{{ t.report_number|format(report_id|replace('ЭКО', t.report_id_prefix), report_date|format_date) }}</p>
+    </div>
+
+    <h2>1. {{ t.general_info }}</h2>
+    <div class="summary-box">
+        <p><strong>{{ t.monitoring_object }}:</strong> {{ object_name|translate }}</p>
+        <p><strong>{{ t.observation_period }}:</strong> {{ start_date|format_date }} - {{ end_date|format_date }}</p>
+        <p><strong>{{ t.total_points }}:</strong> {{ total_points }}</p>
+        <p><strong>{{ t.total_samples }}:</strong> {{ total_samples }}</p>
+        <p><strong>{{ t.executor }}:</strong> {{ executor|translate }}</p>
+    </div>
+
+    <h2>2. {{ t.sample_results }}</h2>
+    <h3>2.1. {{ t.summary_table }}</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>{{ t.date }}</th>
+                <th>{{ t.coordinates }}</th>
+                <th>NH₄ ({{ t.concentration_unit }})</th>
+                <th>NO₂ ({{ t.concentration_unit }})</th>
+                <th>{{ t.izv }}</th>
+                <th>{{ t.class_short }}</th>
+                <th>{{ t.exceedance_column|format(exceedance_factor) }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for sample in samples %}
+            <tr{% if sample.exceeded_params %} class="exceedance"{% endif %}>
+                <td>{{ sample.id }}</td>
+                <td>{{ sample.date|format_date }}</td>
+                <td>{{ "%.4f, %.4f"|format(sample.lat, sample.lon) }}</td>
+                <td>{{ "%.3f"|format(sample.NH4) }}</td>
+                <td>{{ "%.3f"|format(sample.NO2) }}</td>
+                <td>{{ "%.2f"|format(sample.IZV) }}</td>
+                <td>{{ sample.quality_class|translate }}</td>
+                <td>{% for item in sample.exceeded_params %}{{ item.name|translate }} ({{ "%.1f"|format(item.ratio) }}×){% if not loop.last %}, {% endif %}{% else %}—{% endfor %}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="8" style="text-align:center;">{{ t.no_samples }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% if samples|selectattr('exceeded_params')|list %}
+    <p class="table-note">{{ t.exceedance_note|format(exceedance_factor) }}</p>
+    {% endif %}
+
+    <h3>2.2. {{ t.class_statistics }}</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>{{ t.quality_class }}</th>
+                <th>{{ t.sample_count }}</th>
+                <th>{{ t.mean_izv }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for class_name, stats in class_stats.items() %}
+            <tr>
+                <td>{{ class_name|translate }}</td>
+                <td>{{ stats.count }}</td>
+                <td>{{ "%.2f"|format(stats.avg_izv) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h2>3. {{ t.charts_and_maps }}</h2>
+    <div class="image-container">
+        <h3>3.1. {{ t.pollutant_distribution }}</h3>
+        <img src="../class_data/pollutants_distribution_{{ lang }}.png" alt="{{ t.pollutant_distribution_alt }}">
+    </div>
+    <div class="image-container">
+        <h3>3.2. {{ t.water_quality_map }}</h3>
+        <img src="../class_data/izv_map_static_{{ lang }}.png" alt="{{ t.water_quality_map }}">
+    </div>
+    {% if chlorophyll_analysis %}
+    <div class="image-container">
+        <h3>3.3. {{ t.eutrophication_analysis }}</h3>
+        <img src="../class_data/chlorophyll_analysis_{{ lang }}.png" alt="{{ t.chlorophyll_alt }}">
+        <p>{{ t.mean_chlorophyll|format("%.2f"|format(mean_chl)) }}</p>
+        <p>{{ t.trophic_status|format(trophic_status|translate) }}</p>
+    </div>
+    {% endif %}
+
+    <h2>4. {{ t.water_quality_assessment }}</h2>
+    <div class="summary-box">
+        <p><strong>{{ t.mean_izv_all }}:</strong> {{ "%.2f"|format(avg_izv) }}</p>
+        <p><strong>{{ t.dominant_class }}:</strong> {{ dominant_class|translate }}</p>
+    </div>
+    {% if high_risk_samples %}
+    <div class="danger">
+        <h3>{{ t.high_risk_title }}</h3>
+        <ul>
+            {% for sample in high_risk_samples %}
+            <li>{{ t.high_risk_item|format(sample.id, sample.date|format_date, "%.2f"|format(sample.IZV)) }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    {% if chlorophyll_analysis %}
+    <div class="warning">
+        <h3>{{ t.eutrophication_risk }}</h3>
+        <p>{{ t.eutrophication_text|format("%.2f"|format(mean_chl), trophic_status|translate) }}</p>
+        <ul>
+            <li>{{ t.oligotrophic_share|format("%.1f"|format(oligo_pct)) }}</li>
+            <li>{{ t.mesotrophic_share|format("%.1f"|format(meso_pct)) }}</li>
+            <li>{{ t.eutrophic_share|format("%.1f"|format(eu_pct)) }}</li>
+            <li>{{ t.hypereutrophic_share|format("%.1f"|format(hyper_pct)) }}</li>
+        </ul>
+    </div>
+    {% endif %}
+
+    <h2>5. {{ t.conclusions_and }} {{ t.recommendations|upper }}</h2>
+    <ol>
+        <li>{{ t.conclusion_regulation }}</li>
+        {% if main_pollutants_list %}
+        <li>{{ t.conclusion_pollutants|format(main_pollutants_list|map('translate')|join(', ')) }}</li>
+        {% else %}
+        <li>{{ t.conclusion_no_pollutants }}</li>
+        {% endif %}
+        <li>{{ t.conclusion_research }}</li>
+        <li>{{ t.conclusion_gis }}</li>
+    </ol>
+
+    <div class="signature">
+        <p>{{ t.signature_position }}</p>
+        <p>____________________ / {{ t.signature_name }}/</p>
+        <p>{{ t.stamp }}</p>
+    </div>
+
+    {% if attachments %}
+    <h2>6. {{ t.attachments }}</h2>
+    <ul>
+        {% for attachment in attachments %}
+        <li>{{ t[attachment.key] }}: {{ attachment.path }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <div class="footer">
+        <p>{{ t.footer }}</p>
+    </div>
+</body>
+</html>
