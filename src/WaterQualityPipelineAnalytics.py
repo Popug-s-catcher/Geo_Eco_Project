@@ -58,7 +58,7 @@ class WaterQualityPipelineAnalytics(WaterQualityPipelineExtended):
         'oil': 'Нефтепродукты'
     }
 
-    CHL_A_COEFFS = {'a': 0.5, 'b': -2.0, 'c': 0.5}
+    CHL_A_COEFFS = {'a': 0.2974, 'b': -2.5529, 'c': 1.7358}
 
     POLLUTANT_NAMES = {
         'NH4': 'аммоний',
@@ -656,8 +656,6 @@ class WaterQualityPipelineAnalytics(WaterQualityPipelineExtended):
 
     def calculate_chlorophyll(self):
         with rasterio.open(self.s2_path) as src:
-            print("Band count:", src.count)
-            print("Descriptions:", src.descriptions)
 
             blue = src.read(3).astype(np.float32)
             green = src.read(2).astype(np.float32)
@@ -689,7 +687,7 @@ class WaterQualityPipelineAnalytics(WaterQualityPipelineExtended):
         chl_a_estimate = 10 ** (a + b * log_r + c * log_r ** 2)
         self.chl_a_estimate = np.clip(chl_a_estimate, 0, 30)
 
-        water_mask = self.ndwi > 0.2
+        water_mask = self.ndwi > -0.2
         self.chl_a_water = self.chl_a_estimate.copy()
         self.chl_a_water[~water_mask] = np.nan
 

@@ -8,6 +8,7 @@ def main():
     #lb2_run.lb2_run()
     #lb3_run.lb3_run()
     lb5_run.lb5_run()
+    #lb2_run.load_sputnik_image()
 
 if __name__ == '__main__':
     main()

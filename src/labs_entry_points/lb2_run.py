@@ -78,7 +78,7 @@ def load_sputnik_image():
     region = roi.bounds(1, projection['crs'])
 
     exports = {
-        'degtyarsk_water': image.select(['B4', 'B3', 'B2', 'B8', 'B11']),
+        'degtyarsk_water': image.select(['B4', 'B3', 'B2', 'B8', 'B5', 'B11']),
         'dynamic_world_label': label,
     }
 

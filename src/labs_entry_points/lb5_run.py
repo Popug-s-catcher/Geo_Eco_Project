@@ -85,8 +85,8 @@ def task_2_4(analyzer: WaterQualityPipelineAnalytics):
 def lb5_run():
     analyzer = WaterQualityPipelineAnalytics()
     task_1_1(analyzer)
-    task_2_1(analyzer)
-    task_2_2(analyzer)
+    # task_2_1(analyzer)
+    # task_2_2(analyzer)
     #task_2_3(analyzer)
     #task_2_4(analyzer)
     task_3_1(analyzer)
