@@ -1053,7 +1053,7 @@ class WaterQualityPipelineAnalytics(WaterQualityPipelineExtended):
 
     def generate_html_report(
         self,
-        template_dir='templates',
+        template_dir='src/templates',
         template_name='report_template.html',
         output_file=None,
         lang='ru'
